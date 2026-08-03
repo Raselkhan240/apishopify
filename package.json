@@ -1,0 +1,14 @@
+{
+  "name": "apishopify",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "postinstall": "npx puppeteer browsers install chrome"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "node-fetch": "^2.6.7",
+    "puppeteer": "^22.0.0"
+  }
+}
