@@ -196,7 +196,17 @@ app.post('/api/charge', async (req, res) => {
         const combinedText = (paymentText + " " + JSON.stringify(paymentJson)).toLowerCase();
         let rawJsonString = JSON.stringify(paymentJson).toLowerCase();
 
-        if (paymentRes.url.includes('thank_you') || combinedText.includes('thank_you') || combinedText.includes('order_number')) {
+        // Strict Success: Must have thank_you URL and explicitly NOT contain error keywords
+        const isStrictSuccess = 
+            (paymentRes.url.includes('thank_you') || combinedText.includes('thank_you')) &&
+            (combinedText.includes('transactions') || combinedText.includes('order_number')) &&
+            !combinedText.includes('error') &&
+            !combinedText.includes('declined') &&
+            !combinedText.includes('insufficient') &&
+            !rawJsonString.includes('error') &&
+            !rawJsonString.includes('failure');
+
+        if (isStrictSuccess) {
             return res.json({ status: "CHARGED", message: "ORDER_PLACED_SUCCESSFULLY", gateway: "Shopify Payments", price: formattedPrice, site: cleanSite });
         } else if (rawJsonString.includes('insufficient_funds') || rawJsonString.includes('insufficient funds') || combinedText.includes('insufficient_funds')) {
             return res.json({ status: "CVV Live/Insufficient", message: "INSUFFICIENT_FUNDS", gateway: "Shopify Payments", price: formattedPrice, site: cleanSite });
